@@ -76,6 +76,13 @@ pub fn build(b: *std.Build) void {
     ezgl.addImport("gltf", gltf);
     ezgl.addImport("ezmath", ezmath);
 
+    ezgl.addIncludePath(b.path("..\\KTX-Software\\include"));
+    ezgl.addLibraryPath(b.path("..\\KTX-Software\\lib"));
+    ezgl.linkSystemLibrary("ktx", .{
+        .preferred_link_mode = .static,
+    });
+
+    gltf.addImport("ezgl", ezgl);
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -123,28 +130,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    const baseline = b.addExecutable(.{
-        .name = "baseline",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main_bkp.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "learn", .module = mod },
-                .{ .name = "gl", .module = gl_bindings },
-                .{ .name = "ezgl", .module = ezgl },
-                .{ .name = "ezwl", .module = ezwl },
-                .{ .name = "gltf", .module = gltf },
-            },
-        }),
-    });
-
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
     // step). By default the install prefix is `zig-out/` but can be overridden
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
-    b.installArtifact(baseline);
 
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).

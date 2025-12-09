@@ -12,6 +12,7 @@ uniform mat4 world_to_camera;
 uniform vec4 color;
 
 smooth out vec4 the_color;
+smooth out vec2 TexCoord;
 
 void main()
 {
@@ -22,4 +23,5 @@ void main()
     vec4 camera_pos = world_to_camera * world_pos;
     gl_Position = perspective_matrix * camera_pos;
     the_color = color;
+    TexCoord = texcoord_0;
 }

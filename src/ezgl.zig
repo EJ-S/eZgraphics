@@ -3,6 +3,9 @@ const std = @import("std");
 const gl = @import("gl");
 const gltf = @import("gltf");
 const ezmath = @import("ezmath");
+const c = @cImport({
+    @cInclude("ktx.h");
+});
 
 pub const ShaderType = enum(c_uint) {
     compute_shader = gl.COMPUTE_SHADER,
@@ -55,7 +58,9 @@ pub fn createAndCompileShader(shader_type: ShaderType, shader_file_path: []const
 
 /// Creates an openGL program will allocate temp memory on the heap
 pub fn createProgramAndLinkShaders(shader_files: ShaderFileList) !gl.uint {
+    // TODO: Deal with threading
     var threaded: std.Io.Threaded = .init_single_threaded;
+
     const io = threaded.ioBasic();
     var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
     defer arena.deinit();
@@ -147,35 +152,25 @@ pub fn readGlb(path: []const u8, allocator: std.mem.Allocator, io: std.Io) !GlbD
     return .{ .json = parsed_json, .bin = bin_data };
 }
 
-pub fn renderMesh(data: GlbData, allocator: std.mem.Allocator, mesh_index: u32, trs_matrix: [16]f32, opt: *RenderOptions) !void {
+pub fn renderMesh(data: GlbData, mesh_index: u32, trs_matrix: [16]f32, opt: *RenderOptions) !void {
     if (data.bin == null) return RenderError.NoBufferData;
     const mesh = data.json.value.meshes.?[mesh_index];
     for (mesh.primitives) |primitive| {
-        try renderMeshPrimitive(data, allocator, primitive, trs_matrix, opt);
+        try renderMeshPrimitive(data, primitive, trs_matrix, opt);
     }
 }
 
-fn renderMeshPrimitive(data: GlbData, allocator: std.mem.Allocator, mesh_primitive: gltf.MeshPrimitive, trs_matrix: [16]f32, opt: *RenderOptions) !void {
-    _ = allocator;
-
-    var vao: gl.uint = undefined;
-    gl.GenVertexArrays(1, (&vao)[0..1]);
-    defer gl.DeleteVertexArrays(1, (&vao)[0..1]);
-    gl.BindVertexArray(vao);
-    defer gl.BindVertexArray(0);
-
-    var buffers: [7]?gl.uint = [_]?gl.uint{ null, null, null, null, null, null, null };
-    defer for (buffers) |buffer| {
-        if (buffer != null) {
-            gl.DeleteBuffers(1, (&(buffer.?))[0..1]);
-        }
-    };
-
+fn renderMeshPrimitive(data: GlbData, mesh_primitive: gltf.MeshPrimitive, trs_matrix: [16]f32, opt: *RenderOptions) !void {
     gl.UseProgram(opt.program);
+
     const perspective_matrix_uniform: gl.int = gl.GetUniformLocation(opt.program, "perspective_matrix");
     const trs_matrix_uniform: gl.int = gl.GetUniformLocation(opt.program, "trs_matrix");
     const world_to_camera_uniform: gl.int = gl.GetUniformLocation(opt.program, "world_to_camera");
     const color_uniform: gl.int = gl.GetUniformLocation(opt.program, "color");
+    const tex_offset_uniform: gl.int = gl.GetUniformLocation(opt.program, "offset");
+    const tex_scale_uniform: gl.int = gl.GetUniformLocation(opt.program, "scale");
+    const tex_rot_uniform: gl.int = gl.GetUniformLocation(opt.program, "rot");
+
     gl.UniformMatrix4fv(perspective_matrix_uniform, 1, gl.FALSE, &.{opt.perspective});
     gl.UniformMatrix4fv(trs_matrix_uniform, 1, gl.FALSE, &.{trs_matrix});
     gl.UniformMatrix4fv(world_to_camera_uniform, 1, gl.FALSE, &.{opt.world_to_camera});
@@ -186,55 +181,63 @@ fn renderMeshPrimitive(data: GlbData, allocator: std.mem.Allocator, mesh_primiti
         gl.Uniform4fv(color_uniform, 1, &.{color});
     }
 
-    for (mesh_primitive.attributes.map.keys(), mesh_primitive.attributes.map.values()) |attribute, accessor_location| {
-        const shader_location = attributeToShaderLocation(attribute);
-        if (shader_location > 6) continue;
-        // TODO: Add the rest of the accessor options defined in glTF 3.7.2
+    if (data.json.value.materials != null and mesh_primitive.material != null) {
+        const texture_info = data.json.value.materials.?[mesh_primitive.material.?].pbrMetallicRoughness.baseColorTexture;
 
-        // Make the VBO
-        var vbo: gl.uint = undefined;
-        gl.GenBuffers(1, (&vbo)[0..1]);
-        gl.BindBuffer(gl.ARRAY_BUFFER, vbo);
-        defer gl.BindBuffer(gl.ARRAY_BUFFER, 0);
-        buffers[shader_location] = vbo;
+        if (texture_info != null) {
+            const texture = data.json.value.textures.?[texture_info.?.index];
+            const texture_sampler = if (data.json.value.samplers != null and texture.sampler != null) data.json.value.samplers.?[texture.sampler.?] else null;
 
-        const accessor = data.json.value.accessors.?[accessor_location];
-        const buffer_view = data.json.value.bufferViews.?[accessor.bufferView.?];
-        // From Blender Everything is stored in one big buffer
+            if (texture_info.?.extensions != null and texture_info.?.extensions.?.KHR_texture_transform != null) {
+                gl.Uniform2fv(tex_offset_uniform, 1, &.{texture_info.?.extensions.?.KHR_texture_transform.?.offset});
+                gl.Uniform2fv(tex_scale_uniform, 1, &.{texture_info.?.extensions.?.KHR_texture_transform.?.scale});
+                gl.Uniform1f(tex_rot_uniform, texture_info.?.extensions.?.KHR_texture_transform.?.rotation);
+            } else {
+                gl.Uniform2f(tex_offset_uniform, 0.0, 0.0);
+                gl.Uniform2f(tex_scale_uniform, 1.0, 1.0);
+                gl.Uniform1f(tex_rot_uniform, 0.0);
+            }
 
-        gl.EnableVertexAttribArray(shader_location);
-        gl.VertexAttribPointer(shader_location, gltfTypeToSize(accessor.type), @intCast(accessor.componentType), boolToGlBool(accessor.normalized), @intCast(buffer_view.byteStride orelse 0), accessor.byteOffset);
+            if (texture.extensions != null and texture.extensions.?.KHR_texture_basisu != null) {
+                const image = data.json.value.images.?[texture.extensions.?.KHR_texture_basisu.?.source];
+                if (image.bufferView != null) {
+                    // TODO: IF I USE MORPH TARGETS I NEED TO DEQUANTIZE THIS / SAME WITH ACCESSOR MIN / MAX
 
-        gl.BufferData(gl.ARRAY_BUFFER, @intCast(buffer_view.byteLength), &(data.bin.?[buffer_view.byteOffset]), gl.STATIC_DRAW);
+                    gl.BindTexture(texture.extras.?.uploadedTexture.?.target, texture.extras.?.uploadedTexture.?.texture);
+                    gl.TexParameteri(texture.extras.?.uploadedTexture.?.target, gl.TEXTURE_WRAP_S, if (texture_sampler != null) @intCast(texture_sampler.?.wrapS) else gl.REPEAT);
+                    gl.TexParameteri(texture.extras.?.uploadedTexture.?.target, gl.TEXTURE_WRAP_T, if (texture_sampler != null) @intCast(texture_sampler.?.wrapT) else gl.REPEAT);
+                    gl.TexParameteri(texture.extras.?.uploadedTexture.?.target, gl.TEXTURE_MAG_FILTER, if (texture_sampler != null and texture_sampler.?.magFilter != null) @intCast(texture_sampler.?.magFilter.?) else gl.LINEAR);
+                    gl.TexParameteri(texture.extras.?.uploadedTexture.?.target, gl.TEXTURE_MIN_FILTER, if (texture_sampler != null and texture_sampler.?.minFilter != null) @intCast(texture_sampler.?.minFilter.?) else gl.LINEAR_MIPMAP_LINEAR);
+                }
+            }
+        }
     }
 
     const index_accessor = data.json.value.accessors.?[mesh_primitive.indices.?];
-    const index_buffer_view = data.json.value.bufferViews.?[index_accessor.bufferView.?];
 
-    var ibo: gl.uint = undefined;
-    gl.GenBuffers(1, (&ibo)[0..1]);
-    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
-    defer gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, 0);
-    gl.BufferData(gl.ELEMENT_ARRAY_BUFFER, @intCast(index_buffer_view.byteLength), &(data.bin.?[index_buffer_view.byteOffset]), gl.STATIC_DRAW);
-
+    gl.BindVertexArray(mesh_primitive.extras.?.uploadedPrimitive.?.vao);
     gl.FrontFace(opt.winding_order);
-
-    gl.DrawElements(gltfPrimitiveMeshModeToTopologyType(mesh_primitive.mode), @intCast(index_accessor.count), @intCast(index_accessor.componentType), 0);
+    gl.DrawElements(
+        gltfPrimitiveMeshModeToTopologyType(mesh_primitive.mode),
+        @intCast(index_accessor.count),
+        @intCast(index_accessor.componentType),
+        0,
+    );
 }
 
-pub fn renderGltf(data: GlbData, allocator: std.mem.Allocator, trs_matrix: [16]f32, opt: *RenderOptions) !void {
+pub fn renderGltf(data: GlbData, trs_matrix: [16]f32, opt: *RenderOptions) !void {
     if (data.json.value.scenes == null) return RenderError.NoScenes;
-    try renderScene(data, allocator, data.json.value.scenes.?[data.json.value.scene orelse 0], trs_matrix, opt);
+    try renderScene(data, data.json.value.scenes.?[data.json.value.scene orelse 0], trs_matrix, opt);
 }
 
-pub fn renderScene(data: GlbData, allocator: std.mem.Allocator, scene: gltf.Scene, trs_matrix: [16]f32, opt: *RenderOptions) !void {
+pub fn renderScene(data: GlbData, scene: gltf.Scene, trs_matrix: [16]f32, opt: *RenderOptions) !void {
     if (scene.nodes == null) return RenderError.NoNodes;
     for (scene.nodes.?) |node_index| {
-        try renderNode(data, allocator, data.json.value.nodes.?[node_index], trs_matrix, opt);
+        try renderNode(data, data.json.value.nodes.?[node_index], trs_matrix, opt);
     }
 }
 
-fn renderNode(data: GlbData, allocator: std.mem.Allocator, node: gltf.Node, trs_matrix: [16]f32, opt: *RenderOptions) !void {
+fn renderNode(data: GlbData, node: gltf.Node, trs_matrix: [16]f32, opt: *RenderOptions) !void {
     var node_matrix: [16]f32 = undefined;
     if (node.matrix != null) {
         node_matrix = ezmath.matrixCopy(node.matrix.?);
@@ -253,13 +256,140 @@ fn renderNode(data: GlbData, allocator: std.mem.Allocator, node: gltf.Node, trs_
 
     if (node.children != null) {
         for (node.children.?) |child_index| {
-            try renderNode(data, allocator, data.json.value.nodes.?[child_index], node_matrix, opt);
+            try renderNode(data, data.json.value.nodes.?[child_index], node_matrix, opt);
         }
     }
     if (node.mesh != null) {
         const det = ezmath.det(node_matrix);
         opt.winding_order = if (det > 0) gl.CCW else gl.CW;
-        try renderMesh(data, allocator, node.mesh.?, node_matrix, opt);
+        try renderMesh(data, node.mesh.?, node_matrix, opt);
+    }
+}
+
+pub fn uploadGltf(data: *GlbData, allocator: std.mem.Allocator) !void {
+    try uploadMeshPrimitives(data, allocator);
+    try transcodeAndUploadTextures(data);
+}
+
+fn uploadMeshPrimitives(data: *GlbData, allocator: std.mem.Allocator) !void {
+    for (data.json.value.meshes.?) |*mesh| {
+        for (mesh.primitives) |*primitive| {
+            if (primitive.extras == null) {
+                primitive.extras = .{};
+            }
+            primitive.extras.?.uploadedPrimitive = try uploadMeshPrimitive(data.*, allocator, primitive.*);
+        }
+    }
+}
+
+fn uploadMeshPrimitive(data: GlbData, allocator: std.mem.Allocator, mesh_primitive: gltf.MeshPrimitive) !UploadedMeshPrimitive {
+
+    // This temp allocates on the heap
+    var temp_allocator = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    defer temp_allocator.deinit();
+    const arena = temp_allocator.allocator();
+    var uploaded_buffers = std.AutoHashMap(u32, void).init(arena);
+
+    var count: u32 = 0;
+    for (mesh_primitive.attributes.map.keys()) |attribute| {
+        const shader_location = attributeToShaderLocation(attribute);
+        if (shader_location > 6) {
+            std.debug.print("Using unknown attribute: {s}\n", .{attribute});
+            continue;
+        }
+        count += 1;
+    }
+
+    var vao: gl.uint = undefined;
+    gl.GenVertexArrays(1, (&vao)[0..1]);
+    // TODO: PUT THIS IN THE DESTORY CODE //defer gl.DeleteVertexArrays(1, (&vao)[0..1]);
+    gl.BindVertexArray(vao);
+
+    var vbos = try allocator.alloc(gl.uint, count);
+
+    var vbo: gl.uint = undefined;
+
+    for (mesh_primitive.attributes.map.keys(), mesh_primitive.attributes.map.values(), 0..) |attribute, accessor_location, i| {
+        const shader_location = attributeToShaderLocation(attribute);
+        if (shader_location > 6) {
+            std.debug.print("Using unknown attribute: {s}\n", .{attribute});
+            continue;
+        }
+        // TODO: Add the rest of the accessor options defined in glTF 3.7.2
+        // TODO: I might want to investigate generating all buffers on oject load and not each frame
+
+        const accessor = data.json.value.accessors.?[accessor_location];
+        const buffer_view = data.json.value.bufferViews.?[accessor.bufferView.?];
+
+        if (!uploaded_buffers.contains(accessor.bufferView.?)) {
+            gl.BindBuffer(gl.ARRAY_BUFFER, 0);
+            gl.GenBuffers(1, (&vbo)[0..1]);
+            gl.BindBuffer(gl.ARRAY_BUFFER, vbo);
+            vbos[i] = vbo;
+
+            gl.EnableVertexAttribArray(shader_location);
+            gl.VertexAttribPointer(shader_location, gltfTypeToSize(accessor.type), @intCast(accessor.componentType), boolToGlBool(accessor.normalized), @intCast(buffer_view.byteStride orelse 0), accessor.byteOffset);
+
+            gl.BufferData(gl.ARRAY_BUFFER, @intCast(buffer_view.byteLength), &(data.bin.?[buffer_view.byteOffset + accessor.byteOffset]), gl.STATIC_DRAW);
+
+            try uploaded_buffers.put(accessor.bufferView.?, {});
+        } else {
+            gl.EnableVertexAttribArray(shader_location);
+            gl.VertexAttribPointer(shader_location, gltfTypeToSize(accessor.type), @intCast(accessor.componentType), boolToGlBool(accessor.normalized), @intCast(buffer_view.byteStride orelse 0), accessor.byteOffset);
+        }
+    }
+
+    const index_accessor = data.json.value.accessors.?[mesh_primitive.indices.?];
+    const index_buffer_view = data.json.value.bufferViews.?[index_accessor.bufferView.?];
+
+    var ibo: gl.uint = undefined;
+    gl.GenBuffers(1, (&ibo)[0..1]);
+    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+    defer gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, 0);
+    gl.BufferData(
+        gl.ELEMENT_ARRAY_BUFFER,
+        @intCast(index_buffer_view.byteLength),
+        &(data.bin.?[index_buffer_view.byteOffset + index_accessor.byteOffset]),
+        gl.STATIC_DRAW,
+    );
+
+    gl.BindVertexArray(0);
+    gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, 0);
+    gl.BindBuffer(gl.ARRAY_BUFFER, 0);
+
+    return .{ .vao = vao, .vbos = vbos, .ibo = ibo };
+}
+
+pub fn transcodeAndUploadTextures(data: *GlbData) !void {
+    for (data.json.value.textures.?) |*texture| {
+        if (texture.extensions == null or texture.extensions.?.KHR_texture_basisu == null) continue;
+        var gl_texture: gl.uint = undefined;
+        gl.GenTextures(1, (&gl_texture)[0..1]);
+        const image_source = data.json.value.images.?[texture.extensions.?.KHR_texture_basisu.?.source];
+        const texture_buffer_view = data.json.value.bufferViews.?[image_source.bufferView.?];
+
+        var bc7_texture: *c.ktxTexture2 = undefined;
+        _ = c.ktxTexture2_CreateFromMemory(
+            data.bin.?.ptr + texture_buffer_view.byteOffset,
+            texture_buffer_view.byteLength,
+            c.KTX_TEXTURE_CREATE_NO_FLAGS,
+            @ptrCast(&bc7_texture),
+        );
+
+        _ = c.ktxTexture2_TranscodeBasis(bc7_texture, c.KTX_TTF_BC7_RGBA, 0);
+
+        var target: gl.@"enum" = undefined;
+        var glerror: gl.@"enum" = undefined;
+        _ = c.ktxTexture_GLUpload(@ptrCast(bc7_texture), &gl_texture, &target, &glerror);
+        c.ktxTexture2_Destroy(bc7_texture);
+
+        if (texture.extras == null) {
+            texture.extras = .{};
+        }
+        texture.extras.?.uploadedTexture = .{
+            .texture = gl_texture,
+            .target = target,
+        };
     }
 }
 
@@ -322,10 +452,25 @@ pub const RenderOptions = struct {
     world_to_camera: [16]f32,
 };
 
+pub const RenderContext = struct {
+    data: *GlbData,
+};
+
 const Frustum = struct {
     scale: f32,
     z_near: f32,
     z_far: f32,
+};
+
+pub const UploadedTexture = struct {
+    texture: gl.uint,
+    target: gl.@"enum",
+};
+
+pub const UploadedMeshPrimitive = struct {
+    vao: gl.uint,
+    vbos: []const gl.uint,
+    ibo: gl.uint,
 };
 
 const ParseError = error{ NotGlbFile, IncorrectGltfVersion, MalformedGlbFile };

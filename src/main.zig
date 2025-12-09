@@ -190,7 +190,7 @@ pub fn main() !void {
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    const glb_data = try ezgl.readGlb("C:\\Users\\elijah\\Documents\\Blender Objects\\2rubik.glb", arena_allocator, io);
+    var glb_data = try ezgl.readGlb("C:\\Users\\elijah\\Documents\\Blender Objects\\learn\\PBRPacked2.glb", arena_allocator, io);
 
     // === === Set up the Perspective Matrix
     var perspective_matrix = [_]f32{0} ** 16;
@@ -212,6 +212,8 @@ pub fn main() !void {
 
     const camera_up: @Vector(3, f32) = .{ 0, 1, 0 };
     var camera_front: @Vector(3, f32) = .{ 0, 0, -1 };
+
+    try ezgl.uploadGltf(&glb_data, allocater);
 
     var render_options: ezgl.RenderOptions = .{
         .program = program,
@@ -292,7 +294,7 @@ pub fn main() !void {
 
         render_options.world_to_camera = ezmath.lookAt(camera_position, camera_position + camera_front, camera_up);
 
-        try ezgl.renderGltf(glb_data, arena_allocator, trs_matrix, &render_options);
+        try ezgl.renderGltf(glb_data, trs_matrix, &render_options);
 
         c.glfwSwapBuffers(window);
         c.glfwPollEvents();

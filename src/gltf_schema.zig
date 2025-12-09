@@ -1,4 +1,5 @@
 const std = @import("std");
+const ezgl = @import("ezgl");
 const JsonValue = std.json.Value;
 
 pub const Accessor = struct {
@@ -139,13 +140,13 @@ pub const Gltf = struct {
     cameras: ?[]const Camera = null,
     images: ?[]const Image = null,
     materials: ?[]const Material = null,
-    meshes: ?[]const Mesh = null,
+    meshes: ?[]Mesh = null,
     nodes: ?[]const Node = null,
     samplers: ?[]const Sampler = null,
     scene: ?GltfId = null,
     scenes: ?[]const Scene = null,
     skins: ?[]const Skin = null,
-    textures: ?[]const Texture = null,
+    textures: ?[]Texture = null,
     extensions: Extension = null,
     extras: Extras = null,
 };
@@ -213,7 +214,7 @@ pub const MaterialPbrMetallicRoughness = struct {
 };
 
 pub const Mesh = struct {
-    primitives: []const MeshPrimitive,
+    primitives: []MeshPrimitive,
     weights: ?[]const f64 = null,
     name: ?[]const u8 = null,
     extensions: Extension = null,
@@ -227,7 +228,11 @@ pub const MeshPrimitive = struct {
     mode: i64 = 4,
     targets: ?[]const std.json.ArrayHashMap(GltfId) = null,
     extensions: Extension = null,
-    extras: Extras = null,
+    extras: ?MeshPrimitiveExtras = null,
+};
+
+pub const MeshPrimitiveExtras = struct {
+    uploadedPrimitive: ?ezgl.UploadedMeshPrimitive = null,
 };
 
 pub const Node = struct {
@@ -275,6 +280,27 @@ pub const Texture = struct {
     sampler: ?GltfId = null,
     source: ?GltfId = null,
     name: ?[]const u8 = null,
+    extensions: ?TextureExtension = null,
+    extras: ?TextureExtras = null,
+};
+
+pub const TextureExtension = struct {
+    KHR_texture_basisu: ?KhrTextureBasisu = null,
+};
+
+pub const TextureExtras = struct {
+    uploadedTexture: ?ezgl.UploadedTexture = null,
+};
+
+pub const KhrTextureBasisu = struct {
+    source: u32,
+};
+
+pub const KhrTextureTransform = struct {
+    offset: [2]f32 = [2]f32{ 0, 0 },
+    rotation: f32 = 0.0,
+    scale: [2]f32 = [2]f32{ 1, 1 },
+    texCoord: ?i32 = null,
     extensions: Extension = null,
     extras: Extras = null,
 };
@@ -282,6 +308,10 @@ pub const Texture = struct {
 pub const TextureInfo = struct {
     index: GltfId,
     texCoord: u64 = 0, //>= 0
-    extensions: Extension = null,
+    extensions: ?TextureInfoExtension = null,
     extras: Extras = null,
+};
+
+pub const TextureInfoExtension = struct {
+    KHR_texture_transform: ?KhrTextureTransform = null,
 };
